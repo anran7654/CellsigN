@@ -15,7 +15,8 @@ CellSigN is a Python script tool. Python environment needs:
 
 # Input
 The input type of each single-cell sequencing data expression matrix is `​​.csv` or `.txt`, where rows represent cell names and columns represent features (genes).It is important that cellsign also inputs the Meta data file in order to obtain the cell type of the cell in the analysis. The example expression matrix and meta data is available for download under `Example Data/`.
-- 1. Modify the single-cell sequencing expression matrix file path (`args.file_path`) and Meta data（`agrs.cell_path`） file path in `run.py`
+- 1. When running `run.py` from the command line, provide the single-cell sequencing expression matrix path via `--file_path` and the metadata path via `--cell_path`.
+
 - Excerpt from the example matrix：
 
 | Gene      | BC01_02      | BC01_03      | BC01_04      | BC01_05      | BC01_06      |
