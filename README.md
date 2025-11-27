@@ -42,7 +42,8 @@ The input type of each single-cell sequencing data expression matrix is `​​.
 | BC01_50   | Stromal   |
 | BC01_53   | Malignant |
 
-- 2.Modify the complete intracellular signaling library file path (`pathway_file`) and the curated ligand–receptor library（`ligand_file`） file path in `run.py`.The librarys are available for download under `Interaction Database/`.
+- 2. When running `run.py` from the command line, provide the complete intracellular signaling library path via `--pathway_file` and the curated ligand–receptor library path via `--ligand_file`. These libraries are available for download under `Interaction Database/`.
+`.
 
 ## Parameter Adjustment
 
