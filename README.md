@@ -43,7 +43,30 @@ The input type of each single-cell sequencing data expression matrix is `​​.
 
 - 2.Modify the complete intracellular signaling library file path (`pathway_file`) and the curated ligand–receptor library（`ligand_file`） file path in `run.py`.The librarys are available for download under `Interaction Database/`.
 
-# Parameter Adjustment
+## Parameter Adjustment
+
+### Required parameters
+
+The following arguments must be provided when running `run.py`:
+
+- `--file_path` (str)  
+  Path to the gene expression matrix file (e.g. `.txt`).
+
+- `--cell_path` (str)  
+  Path to the cell-type annotation file. (e.g. `.txt` or `.csv`).
+
+- `--pathway_file` (str)  
+  Path to the pathway interaction file (e.g. `Pathway_Commons.txt`).
+
+- `--ligand_file` (str)  
+  Path to the ligand–receptor interaction file (e.g. `ligand-receptor.txt`).
+
+- `--output_dir` (str)  
+  Directory for saving all output files. It will be created automatically if it does not exist.
+
+---
+
+### Optional parameters
 Detailed parameter descriptions and default values ​​are as follows:
 - `--min_cell` (float, default: `0.01`)  
   parameter for gene filtering
@@ -74,4 +97,4 @@ Detailed parameter descriptions and default values ​​are as follows:
   You can specify the output path to output the preprocessed gene list
 
 # Contact
-For any questions please contact Miss. Yu Zhao (Email: 1551333252@qq.com).
+For any questions please contact Miss. Yu Zhao (Email: zhaoyu@ncpsb.org.cn).
