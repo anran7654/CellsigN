@@ -1,0 +1,4 @@
+Gene1	Gene2	Type
+REC	MED	controls-state-change-of
+MED	TF	controls-phosphorylation-of
+TF	TG	controls-expression-of
