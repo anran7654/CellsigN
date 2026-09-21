@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cellsign"
+version = "0.3.5"
+description = "Receiver-specific data-driven and prior-annotated inference of candidate transcellular signaling paths from single-cell RNA-seq data"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { file = "LICENSE" }
+dependencies = [
+  "anndata>=0.10,<1",
+  "networkx>=3,<4",
+  "numpy>=1.24,<3",
+  "pandas>=2,<3",
+  "scanpy>=1.10,<2",
+  "scipy>=1.10,<2",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=8,<9"]
+
+[project.scripts]
+cellsign = "main.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["main"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
