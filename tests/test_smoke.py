@@ -1,4 +1,4 @@
-"""End-to-end test for the staged packaged example."""
+"""End-to-end test using the small synthetic fixture in tests/data."""
 
 import json
 from pathlib import Path
@@ -14,10 +14,10 @@ def test_packaged_example_produces_a_path(tmp_path: Path):
     output_dir = tmp_path / "Results_expression"
     main([
         "--stage", "evidence",
-        "--expression", str(root / "example" / "expression.tsv"),
-        "--cell-path", str(root / "example" / "cell_types.tsv"),
-        "--intracellular-prior", str(root / "example" / "intracellular_prior.tsv"),
-        "--ligand-receptor-prior", str(root / "example" / "ligand_receptor.tsv"),
+        "--expression", str(root / "tests" / "data" / "expression.tsv"),
+        "--cell-path", str(root / "tests" / "data" / "cell_types.tsv"),
+        "--intracellular-prior", str(root / "tests" / "data" / "intracellular_prior.tsv"),
+        "--ligand-receptor-prior", str(root / "tests" / "data" / "ligand_receptor.tsv"),
         "--output-dir", str(output_base),
         "--pair", "Sender:Receiver",
         "--alpha", "0.05",
@@ -29,9 +29,9 @@ def test_packaged_example_produces_a_path(tmp_path: Path):
 
     main([
         "--stage", "paths",
-        "--expression", str(root / "example" / "expression.tsv"),
-        "--intracellular-prior", str(root / "example" / "intracellular_prior.tsv"),
-        "--ligand-receptor-prior", str(root / "example" / "ligand_receptor.tsv"),
+        "--expression", str(root / "tests" / "data" / "expression.tsv"),
+        "--intracellular-prior", str(root / "tests" / "data" / "intracellular_prior.tsv"),
+        "--ligand-receptor-prior", str(root / "tests" / "data" / "ligand_receptor.tsv"),
         "--output-dir", str(output_base),
         "--pair", "Sender:Receiver",
         "--path-permutations", "5",
