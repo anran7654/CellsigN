@@ -110,8 +110,7 @@ Reference origins, limitations and checksums are described in
    path and receptor costs by edge-cost permutation, and attach sender ligands
    and receiver TF targets. Ordered directions are evaluated independently.
 
-The full statistical definitions, cost formula and permutation tests are in
-[METHODS.md](METHODS.md). The [command-line guide](README_COMMAND_LINE_GUIDE.md)
+The [command-line guide](README_COMMAND_LINE_GUIDE.md)
 shows one-stage and separate `evidence`/`paths` runs. A `paths` run reuses
 saved evidence rather than recalculating receiver statistics.
 
