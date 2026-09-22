@@ -613,6 +613,7 @@ def _run_path_stage(
         },
         "ligand_receptor_reading": "all rows; first two columns only; no score filter",
         "path_rule": "weighted k shortest simple directed paths; no maximum path length",
+        "path_graph_policy": "intersection of evidence-supported edges and intracellular signaling prior",
         "path_null": "retained path-graph edge costs permuted over fixed topology",
         "direction_counts": direction_counts,
         "path_search": path_search,

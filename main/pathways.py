@@ -82,12 +82,15 @@ def select_path_graph_edges(
     edge_evidence: pd.DataFrame,
     data_edges_per_node: int,
 ) -> pd.DataFrame:
-    """Return all retained receiver-association edges.
+    """Keep only evidence-supported edges found in the signaling prior.
 
     ``data_edges_per_node`` is accepted only for command-line compatibility
     with 0.3.3 and has no effect.
     """
-    retained = edge_evidence[edge_evidence["Edge_Retained"]].copy()
+    retained = edge_evidence[
+        edge_evidence["Edge_Retained"].astype(bool)
+        & edge_evidence["Prior_Found"].astype(bool)
+    ].copy()
     return retained.drop_duplicates("Edge_ID").reset_index(drop=True)
 
 
@@ -374,11 +377,12 @@ def prepare_receiver_path_cache(
     retained_count = int(receiver_edges["Edge_Retained"].sum()) if not receiver_edges.empty else 0
     unannotated_count = int((~path_edges["Prior_Found"].astype(bool)).sum()) if not path_edges.empty else 0
     prior_count = int(path_edges["Prior_Found"].sum()) if not path_edges.empty else 0
+    excluded_count = retained_count - len(path_edges)
     if progress:
         progress(
             f"Receiver {receiver}: {retained_count} retained evidence edges -> "
-            f"{len(path_edges)} path-graph edges "
-            f"({prior_count} prior-annotated, {unannotated_count} unannotated); "
+            f"{len(path_edges)} prior-supported path-graph edges "
+            f"({excluded_count} retained edges without prior excluded); "
             f"{len(receptors)} receptors, {len(tf_candidates)} TFs"
         )
 

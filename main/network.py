@@ -139,9 +139,9 @@ def build_cell_network(
     """Test all unordered DEG pairs within one receiver cell type.
 
     The statistical network is built before prior knowledge is overlaid. A
-    retained edge with an intracellular prior uses the recorded prior
-    direction during path inference; an unannotated retained edge is treated
-    as bidirectional because the association evidence itself is undirected.
+    Only retained edges found in the intracellular signaling prior enter path
+    inference, where they follow their recorded prior directions. Unannotated
+    retained edges remain in the statistical evidence table.
     """
     receiver_expression = np.asarray(receiver_expression, dtype=float)
     if receiver_expression.ndim != 2:
