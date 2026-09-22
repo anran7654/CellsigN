@@ -102,9 +102,10 @@ Reference origins, limitations and checksums are described in
    using Pearson correlation and a nested linear-versus-cubic model comparison.
    Apply BH correction to the edge-test families and assess effect size and
    bootstrap stability.
-4. Retain evidence-supported association edges, assign edge costs, then
-   annotate known intracellular directions and receptor/TF roles from the
-   prior. The prior does not turn a failed statistical edge into a path edge.
+4. Retain evidence-supported association edges and assign edge costs. Intersect
+   these edges with the intracellular signaling reference for path search;
+   reference directions and receptor/TF roles constrain the resulting graph.
+   A prior edge without statistical support does not enter the path graph.
 5. Find up to `--k-paths` lowest-cost simple receptor-to-TF paths, assess
    path and receptor costs by edge-cost permutation, and attach sender ligands
    and receiver TF targets. Ordered directions are evaluated independently.
