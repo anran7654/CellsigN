@@ -10,6 +10,8 @@ from typing import Callable
 import networkx as nx
 import numpy as np
 import pandas as pd
+from scipy.sparse import csr_matrix
+from scipy.sparse.csgraph import dijkstra
 
 from .statistics import benjamini_hochberg
 
@@ -276,41 +278,73 @@ def _permutation_p_values(
         for _, _, data in graph.edges(data=True)
     }
     costs = np.asarray([original_cost[edge_id] for edge_id in edge_ids], dtype=float)
-    extreme = {pair: 0 for pair in pairs}
-    targets_by_receptor: dict[str, set[str]] = {}
-    for receptor, tf in pairs:
-        targets_by_receptor.setdefault(receptor, set()).add(tf)
-    observed_receptor = {
-        receptor: min(observed[(receptor, tf)] for tf in targets)
-        for receptor, targets in targets_by_receptor.items()
+    # A receptor can leave its own node, but no other receptor or TF may be
+    # used as an internal node. Give each source receptor a private entrance
+    # whose outgoing arcs share the original edge's permuted cost. In the
+    # common graph, receptor and TF nodes are endpoints (no outgoing arcs).
+    nodes = sorted(graph.nodes)
+    node_index = {node: index for index, node in enumerate(nodes)}
+    edge_index = {edge_id: index for index, edge_id in enumerate(edge_ids)}
+    source_index = {
+        receptor: len(nodes) + index
+        for index, receptor in enumerate(receptor_ids)
     }
-    receptor_extreme = {receptor: 0 for receptor in targets_by_receptor}
+    receptor_index = {
+        receptor: index for index, receptor in enumerate(receptor_ids)
+    }
+    arcs: dict[tuple[int, int], int] = {}
+    for source, target, data in graph.edges(data=True):
+        if target in terminal_only:
+            continue
+        cost_index = edge_index[str(data["Edge_ID"])]
+        if source not in receptors and source not in all_tfs:
+            arcs[(node_index[source], node_index[target])] = cost_index
+        if source in source_index:
+            arcs[(source_index[source], node_index[target])] = cost_index
+    arc_keys = sorted(arcs)
+    rows = np.fromiter((row for row, _ in arc_keys), dtype=np.intp)
+    columns = np.fromiter((column for _, column in arc_keys), dtype=np.intp)
+    arc_cost_index = np.fromiter(
+        (arcs[key] for key in arc_keys), dtype=np.intp
+    )
+    size = len(nodes) + len(receptor_ids)
+    sparse_graph = csr_matrix(
+        (costs[arc_cost_index], (rows, columns)), shape=(size, size)
+    )
+    # Arcs were sorted by row and column; the CSR data order is identical.
+    pair_sources = np.asarray(
+        [receptor_index[receptor] for receptor, _ in pairs], dtype=np.intp
+    )
+    pair_targets = np.asarray(
+        [node_index[tf] for _, tf in pairs], dtype=np.intp
+    )
+    observed_costs = np.asarray([observed[pair] for pair in pairs])
+    receptor_starts = np.unique(pair_sources, return_index=True)[1]
+    observed_receptor = np.minimum.reduceat(observed_costs, receptor_starts)
+    extreme = np.zeros(len(pairs), dtype=np.int64)
+    receptor_extreme = np.zeros(len(receptor_ids), dtype=np.int64)
     rng = np.random.default_rng(seed)
     report_every = max(1, permutations // 10)
     for permutation in range(1, permutations + 1):
-        mapping = dict(zip(edge_ids, rng.permutation(costs)))
-        for _, _, data in graph.edges(data=True):
-            data["weight"] = float(mapping[str(data["Edge_ID"])])
-        for receptor, targets in targets_by_receptor.items():
-            null_costs = _grouped_shortest_costs(
-                graph, receptor, targets, receptors, all_tfs, terminal_only
-            )
-            for tf, null_cost in null_costs.items():
-                pair = (receptor, tf)
-                if null_cost <= observed[pair]:
-                    extreme[pair] += 1
-            if null_costs and min(null_costs.values()) <= observed_receptor[receptor]:
-                receptor_extreme[receptor] += 1
+        shuffled_costs = rng.permutation(costs)
+        sparse_graph.data[:] = shuffled_costs[arc_cost_index]
+        distances = dijkstra(
+            sparse_graph, directed=True,
+            indices=list(source_index.values()), return_predecessors=False,
+        )
+        null_costs = distances[pair_sources, pair_targets]
+        extreme += null_costs <= observed_costs
+        receptor_extreme += (
+            np.minimum.reduceat(null_costs, receptor_starts) <= observed_receptor
+        )
         if progress and (permutation % report_every == 0 or permutation == permutations):
             progress(f"path permutations {permutation}/{permutations}")
-    for _, _, data in graph.edges(data=True):
-        data["weight"] = original_cost[str(data["Edge_ID"])]
     denominator = permutations + 1.0
     return (
-        {pair: (extreme[pair] + 1.0) / denominator for pair in pairs},
+        {pair: (extreme[index] + 1.0) / denominator for index, pair in enumerate(pairs)},
         {
-            receptor: (receptor_extreme[receptor] + 1.0) / denominator
-            for receptor in receptor_ids
+            receptor: (receptor_extreme[index] + 1.0) / denominator
+            for index, receptor in enumerate(receptor_ids)
         },
     )
 
