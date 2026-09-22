@@ -138,7 +138,7 @@ that same intracellular path.
 `Receptor_P`/`Receptor_Q` summarize the best reachable TF for a receptor.
 `Receptor_Significant` compares `Receptor_Q` with `--path-alpha`. These
 statistics are reported, but nonsignificant pathways are not automatically
-deleted. See [METHODS.md](METHODS.md) before interpreting their test families.
+deleted. 
 
 ## Main options and reproducibility
 
