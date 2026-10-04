@@ -147,15 +147,19 @@ def test_number_of_paths_is_controlled_by_k_paths():
     assert set(result.rmtf_paths["Path_Rank"]) == set(range(1, 8))
 
 
-def test_path_graph_keeps_all_retained_edges_with_or_without_prior_annotation():
+def test_path_graph_keeps_only_retained_edges_with_prior_annotation():
+    unsupported_prior_edge = _edge("G", "H", 0.1, prior=True)
+    unsupported_prior_edge["Edge_Retained"] = False
     edges = pd.DataFrame([
         _edge("A", "B", 0.1, prior=False),
         _edge("A", "C", 0.2, prior=False),
         _edge("B", "C", 0.3, prior=False),
         _edge("D", "E", 0.9, prior=True),
+        _edge("D", "F", 0.8, prior=True),
+        unsupported_prior_edge,
     ])
     selected = select_path_graph_edges(edges, data_edges_per_node=1)
-    assert set(selected["Edge_ID"]) == {"A--B", "A--C", "B--C", "D--E"}
+    assert set(selected["Edge_ID"]) == {"D--E", "D--F"}
 
 
 def test_receptor_omnibus_statistics_are_reported_for_every_tf_path():
