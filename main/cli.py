@@ -31,7 +31,8 @@ TEST_COUNT_COLUMNS = [
     "Direction", "Sender", "Receiver", "N_Sender_Cells", "N_Receiver_Cells",
     "N_Input_Genes", "N_Filtered_Genes", "N_HVG",
     "N_DE_Tests_Per_Cell_Type", "N_Sender_DEGs",
-    "N_Receiver_DEGs", "N_Candidate_Gene_Pairs", "N_Pearson",
+    "N_Receiver_DEGs", "N_Sender_Selected_Genes",
+    "N_Receiver_Selected_Genes", "N_Candidate_Gene_Pairs", "N_Pearson",
     "N_Nonlinear_Edges", "N_Nonlinear_Model_Fits", "N_Retained_Edges",
     "N_RTF_Pairs", "N_Path_Permutations", "DE_Threshold",
     "Pair_BH_Method", "Path_BH_Method",
@@ -41,7 +42,7 @@ TEST_COUNT_COLUMNS = [
 EVIDENCE_PARAMETER_NAMES = [
     "cell_type_column", "sample_column", "min_cell_fraction",
     "min_gene_fraction", "target_sum", "normalize", "log1p", "hvg_top_genes",
-    "de_threshold", "alpha", "min_abs_r", "min_delta_r2",
+    "de_threshold", "de_gene_target", "alpha", "min_abs_r", "min_delta_r2",
     "stability_resamples", "relation_weight", "stability_weight",
     "hub_penalty_weight", "hop_penalty", "pair", "malignant_label", "seed",
 ]
@@ -87,6 +88,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Raw one-vs-rest Wilcoxon p-value threshold (default: 0.05).",
     )
     parser.add_argument(
+        "--de-gene-target", type=int, default=500,
+        help=(
+            "Downstream gene-count target used only when fewer DE genes pass. "
+            "Genes with P_Value above --de-threshold are added in ascending "
+            "P-value order until the target is reached; DE lists already at "
+            "or above the target are never truncated. Use 0 to disable "
+            "supplementation (default: 500)."
+        ),
+    )
+    parser.add_argument(
         "--alpha", type=float, default=0.05,
         help="Pearson/nonlinear edge BH threshold (default: 0.05).",
     )
@@ -123,6 +134,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             parser.error(f"--{name.replace('_', '-')} must be between 0 and 1.")
     if args.hvg_top_genes <= 0:
         parser.error("--hvg-top-genes must be positive.")
+    if args.de_gene_target < 0:
+        parser.error("--de-gene-target must be zero or a positive integer.")
     if args.k_paths <= 0:
         parser.error("--k-paths must be positive.")
     if min(args.stability_resamples, args.path_permutations) < 0:
@@ -219,7 +232,7 @@ def _base_manifest(args: argparse.Namespace) -> dict[str, Any]:
     manifest.update({
         "cellsign_version": __version__,
         "interpretation": (
-            "one-vs-rest-DE-filtered, data-driven, prior-annotated "
+            "one-vs-rest-DE-ranked, data-driven, prior-annotated "
             "candidate signaling pathways"
         ),
         "software": _software_versions(),
@@ -230,22 +243,58 @@ def _base_manifest(args: argparse.Namespace) -> dict[str, Any]:
 def _selected_cell_type_genes(
     de_table: pd.DataFrame,
     de_threshold: float,
+    de_gene_target: int = 500,
 ) -> pd.DataFrame:
-    selected = de_table.rename(columns={
+    """Select DE genes and, when needed, add the lowest-P non-DE genes.
+
+    The target is a supplementation ceiling, not a cap on genuine DE genes.
+    If the DE set already contains at least ``de_gene_target`` genes, every DE
+    gene is retained.  When the complete tested gene universe is no larger
+    than the target, all tested genes are retained as requested.
+    """
+    if de_gene_target < 0:
+        raise ValueError("de_gene_target must be zero or a positive integer.")
+    ranked = de_table.rename(columns={
         "Rank": "DE_Rank", "LogFC": "DE_LogFC",
-    })
-    selected = selected[
-        np.isfinite(selected["DE_LogFC"])
-        & (selected["DE_LogFC"] > 0)
-        & np.isfinite(selected["P_Value"])
-        & (selected["P_Value"] < de_threshold)
-    ]
+    }).copy()
+    de_mask = (
+        np.isfinite(ranked["DE_LogFC"])
+        & (ranked["DE_LogFC"] > 0)
+        & np.isfinite(ranked["P_Value"])
+        & (ranked["P_Value"] < de_threshold)
+    )
+    selected = ranked.loc[de_mask].copy()
+    selected["Selection_Source"] = "DE"
     selected = selected.sort_values(
         ["P_Value", "DE_Rank", "Gene"], kind="mergesort"
     ).reset_index(drop=True)
+
+    target = min(de_gene_target, len(ranked))
+    needed = max(0, target - len(selected))
+    if needed:
+        selected_genes = set(selected["Gene"].astype(str))
+        remaining = ranked[
+            ~ranked["Gene"].astype(str).isin(selected_genes)
+        ].copy()
+        if len(ranked) <= de_gene_target:
+            supplement = remaining
+            source = "all_genes_below_target"
+        else:
+            supplement = remaining[
+                np.isfinite(remaining["P_Value"])
+                & (remaining["P_Value"] > de_threshold)
+            ].copy()
+            source = "p_value_supplement"
+        supplement = supplement.sort_values(
+            ["P_Value", "DE_Rank", "Gene"], kind="mergesort",
+            na_position="last",
+        ).head(needed)
+        supplement["Selection_Source"] = source
+        selected = pd.concat([selected, supplement], ignore_index=True)
+
     columns = [
         "Gene", "CellType", "Reference", "DE_Rank", "DE_LogFC",
-        "P_Value",
+        "P_Value", "Selection_Source",
     ]
     return selected[columns]
 
@@ -283,6 +332,7 @@ def _run_evidence_stage(
         adata, args.cell_type_column, de_cell_types,
     )
     selected_by_type: dict[str, pd.DataFrame] = {}
+    deg_counts_by_type: dict[str, int] = {}
     gene_paths: dict[str, Path] = {}
     deg_count_records: list[dict[str, object]] = []
     used_stems: dict[str, str] = {}
@@ -295,15 +345,22 @@ def _run_evidence_stage(
             )
         used_stems[cell_stem] = cell_type
         selected = _selected_cell_type_genes(
-            de_tables[cell_type], args.de_threshold
+            de_tables[cell_type], args.de_threshold, args.de_gene_target
         )
         selected_by_type[cell_type] = selected
+        n_degs = int((selected["Selection_Source"] == "DE").sum())
+        n_supplemented = int(len(selected) - n_degs)
+        deg_counts_by_type[cell_type] = n_degs
         gene_path = gene_dir / f"{cell_stem}_de_genes.txt"
         gene_paths[cell_type] = gene_path
         _write_table(selected, gene_path)
         full_de = de_tables[cell_type].copy()
         full_de["Selected"] = full_de["Gene"].isin(
             set(selected["Gene"].astype(str))
+        )
+        selection_source = selected.set_index("Gene")["Selection_Source"].to_dict()
+        full_de["Selection_Source"] = (
+            full_de["Gene"].map(selection_source).fillna("")
         )
         _write_table(
             full_de, evidence_dir / f"{cell_stem}_one_vs_rest_de.txt"
@@ -314,12 +371,17 @@ def _run_evidence_stage(
             "N_Cells": n_cells,
             "N_Other_Cells": int(len(labels) - n_cells),
             "N_HVG_Tests": len(hvg_genes),
-            "N_DEGs": len(selected),
+            "N_DEGs": n_degs,
+            "N_Supplemented_Genes": n_supplemented,
+            "N_Selected_Genes": len(selected),
             "DE_Threshold": args.de_threshold,
+            "DE_Gene_Target": args.de_gene_target,
         })
         print(
-            f"[evidence] {cell_type} vs all other cells: {len(selected)} DEGs "
-            f"(raw P < {args.de_threshold:g}, logFC > 0)",
+            f"[evidence] {cell_type} vs all other cells: {n_degs} DEGs "
+            f"(raw P < {args.de_threshold:g}, logFC > 0); "
+            f"{n_supplemented} genes supplemented; "
+            f"{len(selected)} genes enter downstream analysis",
             flush=True,
         )
 
@@ -343,7 +405,7 @@ def _run_evidence_stage(
         if len(receiver_gene_names) < 2:
             _write_table(pd.DataFrame(columns=GENE_EVIDENCE_COLUMNS), gene_evidence_path)
             _write_table(pd.DataFrame(columns=EDGE_EVIDENCE_COLUMNS), edge_path)
-            print("[evidence] fewer than two receiver DE genes; empty network", flush=True)
+            print("[evidence] fewer than two selected receiver genes; empty network", flush=True)
         else:
             positions = np.asarray(
                 [hvg_positions[gene] for gene in receiver_gene_names], dtype=int
@@ -375,7 +437,7 @@ def _run_evidence_stage(
                     ].sum()
                 )
                 print(
-                    f"[evidence] {candidate_count} receiver DEG pairs tested; "
+                    f"[evidence] {candidate_count} receiver selected-gene pairs tested; "
                     f"{retained_count} evidence-supported edges retained "
                     f"({prior_count} with prior direction)",
                     flush=True,
@@ -402,8 +464,10 @@ def _run_evidence_stage(
             "N_Input_Genes": input_genes, "N_Filtered_Genes": filtered_genes,
             "N_HVG": len(hvg_genes),
             "N_DE_Tests_Per_Cell_Type": len(hvg_genes),
-            "N_Sender_DEGs": len(sender_genes),
-            "N_Receiver_DEGs": len(receiver_genes),
+            "N_Sender_DEGs": deg_counts_by_type[sender],
+            "N_Receiver_DEGs": deg_counts_by_type[receiver],
+            "N_Sender_Selected_Genes": len(sender_genes),
+            "N_Receiver_Selected_Genes": len(receiver_genes),
             "N_Candidate_Gene_Pairs": int(network["candidate_count"]),
             "N_Pearson": int(network["candidate_count"]),
             "N_Nonlinear_Edges": int(network["candidate_count"]),
@@ -411,7 +475,9 @@ def _run_evidence_stage(
             "N_Retained_Edges": int(network["retained_count"]),
             "N_RTF_Pairs": 0, "N_Path_Permutations": 0,
             "DE_Threshold": args.de_threshold,
-            "Pair_BH_Method": "Benjamini-Hochberg over all receiver DEG pairs",
+            "Pair_BH_Method": (
+                "Benjamini-Hochberg over all receiver selected-gene pairs"
+            ),
             "Path_BH_Method": "Benjamini-Hochberg across R-TF pairs (diagnostic)",
             "Receptor_BH_Method": "Benjamini-Hochberg across receptors by direction",
         })
@@ -427,7 +493,8 @@ def _run_evidence_stage(
     _write_table(test_counts, other_dir / "test_counts.txt")
     deg_counts = pd.DataFrame(deg_count_records, columns=[
         "CellType", "N_Cells", "N_Other_Cells", "N_HVG_Tests", "N_DEGs",
-        "DE_Threshold",
+        "N_Supplemented_Genes", "N_Selected_Genes", "DE_Threshold",
+        "DE_Gene_Target",
     ])
     _write_table(deg_counts, other_dir / "differential_gene_counts.txt")
     manifest = _base_manifest(args)
@@ -454,13 +521,20 @@ def _run_evidence_stage(
                 "other_cells": int(record["N_Other_Cells"]),
                 "tested_hvgs": int(record["N_HVG_Tests"]),
                 "selected_degs": int(record["N_DEGs"]),
+                "supplemented_genes": int(record["N_Supplemented_Genes"]),
+                "selected_for_downstream_analysis": int(record["N_Selected_Genes"]),
             }
             for record in deg_count_records
         },
         "candidate_edge_policy": (
             "all positive-logFC receiver genes from one-vs-rest DE passing "
-            "the raw-p-value de_threshold; all unordered gene "
-            "pairs are tested before intracellular prior directions are overlaid"
+            "the raw-p-value de_threshold; when that set is smaller than "
+            "de_gene_target, genes above the p-value threshold are added in "
+            "ascending raw-p-value order up to the target (or all tested genes "
+            "when the complete gene universe is smaller); DE sets already at "
+            "or above the target are not truncated; all unordered gene pairs "
+            "among the selected genes are tested before intracellular prior "
+            "directions are overlaid"
         ),
         "multiple_testing": {
             "one_vs_rest_de": "None; raw two-sided Wilcoxon p-values are used",

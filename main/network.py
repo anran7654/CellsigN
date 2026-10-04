@@ -18,6 +18,7 @@ from .statistics import (
 
 GENE_EVIDENCE_COLUMNS = [
     "Receiver", "Gene", "DE_Rank", "DE_LogFC", "P_Value",
+    "Selection_Source",
 ]
 
 EDGE_EVIDENCE_COLUMNS = [
@@ -136,7 +137,7 @@ def build_cell_network(
     hop_penalty: float = 0.05,
     seed: int = 0,
 ) -> CellNetworkResult:
-    """Test all unordered DEG pairs within one receiver cell type.
+    """Test all unordered selected-gene pairs within one receiver cell type.
 
     The statistical network is built before prior knowledge is overlaid. A
     Only retained edges found in the intracellular signaling prior enter path
@@ -151,19 +152,23 @@ def build_cell_network(
     if receiver_expression.shape[0] < 5:
         raise ValueError("The receiver requires at least five cells.")
     if len(genes) < 2:
-        raise ValueError("The receiver has fewer than two selected one-vs-rest DE genes.")
+        raise ValueError("The receiver has fewer than two selected one-vs-rest genes.")
     if min(relation_weight, stability_weight, hub_penalty_weight, hop_penalty) < 0:
         raise ValueError("Cost weights and penalties must be nonnegative.")
     if relation_weight <= 0:
         raise ValueError("--relation-weight must be positive.")
 
     ranking = receiver_gene_table.set_index("Gene").reindex(genes)
+    selection_source = ranking.get(
+        "Selection_Source", pd.Series("DE", index=ranking.index)
+    )
     gene_evidence = pd.DataFrame({
         "Receiver": receiver,
         "Gene": genes,
         "DE_Rank": ranking["DE_Rank"].to_numpy(),
         "DE_LogFC": pd.to_numeric(ranking["DE_LogFC"], errors="coerce").to_numpy(),
         "P_Value": ranking["P_Value"].to_numpy(),
+        "Selection_Source": selection_source.to_numpy(),
     }, columns=GENE_EVIDENCE_COLUMNS)
 
     u_index, v_index, prior_found, prior_direction, prior_type = (
