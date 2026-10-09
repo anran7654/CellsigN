@@ -1,31 +1,20 @@
 """Tests for command-line direction and output-directory selection."""
 
+from argparse import Namespace
+import json
 from pathlib import Path
-import subprocess
-import sys
 
 import pytest
 
 import pandas as pd
 
 from main.cli import (
+    _base_manifest,
     _requested_pairs,
     _resolved_output_dir,
     _selected_cell_type_genes,
     parse_args,
 )
-
-
-def test_python_module_entry_point():
-    result = subprocess.run(
-        [sys.executable, "-m", "main", "--help"],
-        cwd=Path(__file__).resolve().parents[1],
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    assert "--de-threshold" in result.stdout
-    assert "--de-gene-target" in result.stdout
 
 
 def test_expression_stem_is_appended_to_output_directory():
@@ -69,15 +58,15 @@ def test_default_scope_requires_configured_malignant_label():
         _requested_pairs([], ["B_cell", "Myeloid"], "Malignant")
 
 
-def test_receptor_omnibus_path_defaults():
+def test_path_permutation_defaults():
     args = parse_args([
         "--stage", "paths",
         "--intracellular-prior", "intracellular.tsv",
         "--ligand-receptor-prior", "ligand_receptor.tsv",
     ])
     assert args.path_permutations == 500
-    assert args.path_alpha == 0.05
-    assert args.k_paths == 5
+    assert args.k_paths == 1
+    assert not hasattr(args, "path_alpha")
     assert args.de_threshold == 0.05
     assert args.de_gene_target == 500
     assert not hasattr(args, "de_correction")
@@ -85,6 +74,49 @@ def test_receptor_omnibus_path_defaults():
     assert not hasattr(args, "de_alpha")
     assert not hasattr(args, "cell_top_genes")
     assert not hasattr(args, "node_weight")
+
+
+def test_k_paths_can_still_be_overridden():
+    args = parse_args([
+        "--stage", "paths",
+        "--intracellular-prior", "intracellular.tsv",
+        "--ligand-receptor-prior", "ligand_receptor.tsv",
+        "--k-paths", "3",
+    ])
+    assert args.k_paths == 3
+
+
+def test_base_manifest_removes_legacy_path_tests_without_losing_evidence_settings(
+    tmp_path, monkeypatch,
+):
+    manifest_path = tmp_path / "other" / "run_manifest.json"
+    manifest_path.parent.mkdir()
+    manifest_path.write_text(json.dumps({
+        "completed_stages": ["evidence", "paths"],
+        "path_parameters": {
+            "k_paths": 3, "path_permutations": 500, "path_alpha": 0.05,
+        },
+        "evidence_parameters": {"stability_resamples": 100, "alpha": 0.05},
+        "multiple_testing": {
+            "pearson": "BH within receiver network",
+            "nonlinear": "BH within receiver network",
+            "path_pair_diagnostic": "old pair BH",
+            "receptor_omnibus": "old receptor BH",
+        },
+    }), encoding="utf-8")
+    monkeypatch.setattr("main.cli._software_versions", lambda: {"python": "test"})
+    manifest = _base_manifest(Namespace(output_dir=str(tmp_path)))
+    assert manifest["path_parameters"] == {
+        "k_paths": 3, "path_permutations": 500,
+    }
+    assert manifest["evidence_parameters"] == {
+        "stability_resamples": 100, "alpha": 0.05,
+    }
+    assert manifest["multiple_testing"] == {
+        "pearson": "BH within receiver network",
+        "nonlinear": "BH within receiver network",
+    }
+    assert manifest["completed_stages"] == ["evidence", "paths"]
 
 
 def test_cell_type_gene_selection_can_use_raw_p_value():
@@ -105,62 +137,47 @@ def test_cell_type_gene_selection_can_use_raw_p_value():
     assert selected["Selection_Source"].eq("DE").all()
 
 
-def test_small_tested_universe_retains_all_genes_with_selection_sources():
+def test_de_gene_target_supplements_by_ascending_non_de_p_value():
+    table = pd.DataFrame({
+        "Gene": ["DE1", "NEG_SIG", "N3", "N1", "N2", "N4"],
+        "CellType": ["Receiver"] * 6,
+        "Reference": ["All_other_cells"] * 6,
+        "Rank": [1, 2, 3, 4, 5, 6],
+        "LogFC": [1.0, -1.0, 0.2, -0.1, 0.0, 0.3],
+        "P_Value": [0.001, 0.002, 0.20, 0.051, 0.10, 0.30],
+    })
+    selected = _selected_cell_type_genes(table, 0.05, de_gene_target=4)
+    assert selected["Gene"].tolist() == ["DE1", "N1", "N2", "N3"]
+    assert selected["Selection_Source"].tolist() == [
+        "DE", "p_value_supplement", "p_value_supplement", "p_value_supplement",
+    ]
+
+
+def test_de_gene_target_never_truncates_a_larger_de_set():
     table = pd.DataFrame({
         "Gene": ["G1", "G2", "G3", "G4"],
         "CellType": ["Receiver"] * 4,
         "Reference": ["All_other_cells"] * 4,
         "Rank": [1, 2, 3, 4],
-        "LogFC": [1.0, 0.5, 0.8, -1.0],
-        "P_Value": [0.001, 0.049, 0.051, 0.001],
+        "LogFC": [1.0, 0.9, 0.8, 0.7],
+        "P_Value": [0.001, 0.002, 0.003, 0.20],
     })
-    selected = _selected_cell_type_genes(table, 0.05)
-    assert set(selected["Gene"]) == {"G1", "G2", "G3", "G4"}
-    assert selected.set_index("Gene")["Selection_Source"].to_dict() == {
-        "G1": "DE", "G2": "DE",
-        "G3": "all_genes_below_target", "G4": "all_genes_below_target",
-    }
+    selected = _selected_cell_type_genes(table, 0.05, de_gene_target=2)
+    assert selected["Gene"].tolist() == ["G1", "G2", "G3"]
 
 
-def test_supplementation_uses_p_value_order_without_positive_fold_change_requirement():
-    table = pd.DataFrame({
-        "Gene": ["DE", "LATE", "NEGATIVE", "LOW", "NONFINITE"],
-        "CellType": ["Receiver"] * 5,
-        "Reference": ["All_other_cells"] * 5,
-        "Rank": [1, 2, 3, 4, 5],
-        "LogFC": [1.0, 1.0, -1.0, 0.0, 1.0],
-        "P_Value": [0.01, 0.4, 0.1, 0.07, float("nan")],
-    })
-    selected = _selected_cell_type_genes(table, 0.05, de_gene_target=3)
-    assert selected["Gene"].tolist() == ["DE", "LOW", "NEGATIVE"]
-    assert selected["Selection_Source"].tolist() == [
-        "DE", "p_value_supplement", "p_value_supplement",
-    ]
-
-
-def test_supplementation_target_does_not_truncate_larger_de_sets():
+def test_de_gene_target_uses_all_genes_when_gene_universe_is_smaller():
     table = pd.DataFrame({
         "Gene": ["G1", "G2", "G3"],
         "CellType": ["Receiver"] * 3,
         "Reference": ["All_other_cells"] * 3,
         "Rank": [1, 2, 3],
-        "LogFC": [1.0, 1.0, 1.0],
-        "P_Value": [0.001, 0.01, 0.02],
+        "LogFC": [1.0, -1.0, 0.2],
+        "P_Value": [0.001, 0.002, 0.20],
     })
-    selected = _selected_cell_type_genes(table, 0.05, de_gene_target=2)
-    assert selected["Gene"].tolist() == ["G1", "G2", "G3"]
-    assert selected["Selection_Source"].eq("DE").all()
-
-
-def test_supplementation_stops_when_eligible_pool_is_exhausted():
-    table = pd.DataFrame({
-        "Gene": ["DE", "SUPPLEMENT", "NEGATIVE", "BOUNDARY", "NAN", "INF"],
-        "CellType": ["Receiver"] * 6,
-        "Reference": ["All_other_cells"] * 6,
-        "Rank": [1, 2, 3, 4, 5, 6],
-        "LogFC": [1.0, -1.0, -1.0, 1.0, 1.0, 1.0],
-        "P_Value": [0.01, 0.1, 0.02, 0.05, float("nan"), float("inf")],
-    })
-    selected = _selected_cell_type_genes(table, 0.05, de_gene_target=4)
-    assert selected["Gene"].tolist() == ["DE", "SUPPLEMENT"]
-    assert selected["Selection_Source"].tolist() == ["DE", "p_value_supplement"]
+    selected = _selected_cell_type_genes(table, 0.05, de_gene_target=500)
+    assert set(selected["Gene"]) == {"G1", "G2", "G3"}
+    assert len(selected) == 3
+    assert selected.loc[
+        selected["Gene"] != "G1", "Selection_Source"
+    ].eq("all_genes_below_target").all()

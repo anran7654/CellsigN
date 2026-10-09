@@ -1,10 +1,13 @@
 """Tests for weighted R-M-TF path selection."""
 
+import numpy as np
 import pandas as pd
 
 from main.pathways import (
     ReceiverPathCache,
     _build_graph,
+    _grouped_shortest_costs,
+    _permutation_p_values,
     attach_sender_paths,
     infer_paths,
     select_path_graph_edges,
@@ -62,7 +65,7 @@ def test_k_shortest_paths_are_retained_and_ranked_by_cost():
     lr = pd.DataFrame({"Ligand": ["L"], "Receptor": ["R"]})
     result = infer_paths(
         "Sender", "Receiver", {"L"}, {"R", "A", "B", "C", "D", "TF", "TG"},
-        edges, prior, lr, path_permutations=0,
+        edges, prior, lr, path_permutations=0, k_paths=3,
     )
     assert set(result.rmtf_paths["Mediator"]) == {"A", "B", "C,D"}
     assert set(result.rmtf_paths["Path_Rank"]) == {1, 2, 3}
@@ -147,22 +150,39 @@ def test_number_of_paths_is_controlled_by_k_paths():
     assert set(result.rmtf_paths["Path_Rank"]) == set(range(1, 8))
 
 
-def test_path_graph_keeps_only_retained_edges_with_prior_annotation():
-    unsupported_prior_edge = _edge("G", "H", 0.1, prior=True)
-    unsupported_prior_edge["Edge_Retained"] = False
+def test_path_graph_requires_both_statistical_support_and_prior_annotation():
     edges = pd.DataFrame([
         _edge("A", "B", 0.1, prior=False),
         _edge("A", "C", 0.2, prior=False),
         _edge("B", "C", 0.3, prior=False),
         _edge("D", "E", 0.9, prior=True),
-        _edge("D", "F", 0.8, prior=True),
-        unsupported_prior_edge,
+        {**_edge("E", "F", 0.1, prior=True), "Edge_Retained": False},
     ])
     selected = select_path_graph_edges(edges, data_edges_per_node=1)
-    assert set(selected["Edge_ID"]) == {"D--E", "D--F"}
+    assert set(selected["Edge_ID"]) == {"D--E"}
 
 
-def test_receptor_omnibus_statistics_are_reported_for_every_tf_path():
+def test_data_only_shortcut_cannot_enter_prior_constrained_path():
+    edges = pd.DataFrame([
+        _edge("R", "A", 0.4), _edge("A", "TF", 0.4),
+        _edge("R", "TF", 0.01, prior=False),
+    ])
+    prior = pd.DataFrame({
+        "source": ["TF"], "target": ["TG"],
+        "prior_type": ["controls-expression-of"], "layer": ["tf_target"],
+    })
+    lr = pd.DataFrame({"Ligand": ["L"], "Receptor": ["R"]})
+    result = infer_paths(
+        "Sender", "Receiver", {"L"}, {"R", "A", "TF", "TG"},
+        edges, prior, lr, path_permutations=0, k_paths=1,
+    )
+    assert result.rmtf_paths.iloc[0]["Mediator"] == "A"
+    assert result.metadata["retained_input_edges"] == 3
+    assert result.metadata["path_graph_edges"] == 2
+    assert result.path_edges["Prior_Found"].all()
+
+
+def test_only_path_permutation_p_values_are_reported_for_every_tf_path():
     edges = pd.DataFrame([
         _edge("R", "A", 0.1), _edge("A", "TF1", 0.1),
         _edge("R", "B", 0.4), _edge("B", "TF2", 0.4),
@@ -179,15 +199,77 @@ def test_receptor_omnibus_statistics_are_reported_for_every_tf_path():
         edges, prior, lr, path_permutations=9, seed=11,
     )
     assert len(result.rmtf_paths) == 2
+    obsolete_columns = {
+        "Path_Q", "Receptor_P", "Receptor_Q", "Receptor_Significant",
+    }
+    for table in (result.pathways, result.rmtf_paths):
+        assert "Path_P" in table.columns
+        assert obsolete_columns.isdisjoint(table.columns)
+        assert table["Path_P"].between(0.1, 1.0).all()
     assert {
-        "Receptor_P", "Receptor_Q", "Receptor_Significant"
-    }.issubset(result.rmtf_paths.columns)
-    assert result.rmtf_paths["Receptor_P"].nunique() == 1
-    assert result.rmtf_paths["Receptor_Q"].nunique() == 1
-    assert result.metadata["tested_receptors"] == 1
+        "tested_receptors", "significant_receptors", "receptor_fdr_threshold",
+    }.isdisjoint(result.metadata)
+    assert result.metadata["tested_rtf_pairs"] == 2
 
 
-def test_receptor_bh_family_is_distinct_from_rtf_pair_family():
+def test_sparse_permutations_match_original_receptor_search():
+    edges = pd.DataFrame([
+        _edge("R1", "A", 0.15), _edge("A", "TF1", 0.2),
+        _edge("R1", "TF2", 0.5), _edge("A", "R2", 0.01),
+        _edge("R2", "B", 0.25), _edge("B", "TF1", 0.3),
+        _edge("A", "B", 0.0, prior=False),
+        _edge("TF1", "TF2", 0.01),
+        _edge("R1", "X", 0.01), _edge("X", "TF2", 0.01),
+    ])
+    graph = _build_graph(edges)
+    paths = {
+        ("R1", "R2"): [["R1", "A", "R2"]],
+        ("R1", "TF1"): [["R1", "A", "TF1"]],
+        ("R1", "TF2"): [["R1", "TF2"]],
+        ("R2", "TF1"): [["R2", "B", "TF1"]],
+    }
+    receptors, tfs, terminal_only = {"R1", "R2"}, {"R2", "TF1", "TF2"}, {"X"}
+    original_weights = {
+        str(data["Edge_ID"]): data["weight"]
+        for _, _, data in graph.edges(data=True)
+    }
+    pairs = sorted(paths)
+    observed = {
+        pair: sum(graph[u][v]["weight"] for u, v in zip(path[:-1], path[1:]))
+        for pair, (path,) in paths.items()
+    }
+    edge_ids = sorted(original_weights)
+    costs = np.asarray([original_weights[edge_id] for edge_id in edge_ids])
+    expected_pairs = {pair: 0 for pair in pairs}
+    rng = np.random.default_rng(13)
+    for _ in range(37):
+        shuffled = dict(zip(edge_ids, rng.permutation(costs)))
+        for _, _, data in graph.edges(data=True):
+            data["weight"] = shuffled[str(data["Edge_ID"])]
+        for receptor in sorted(receptors):
+            targets = {tf for source, tf in pairs if source == receptor}
+            distances = _grouped_shortest_costs(
+                graph, receptor, targets, receptors, tfs, terminal_only
+            )
+            for tf, cost in distances.items():
+                expected_pairs[(receptor, tf)] += cost <= observed[(receptor, tf)]
+    for _, _, data in graph.edges(data=True):
+        data["weight"] = original_weights[str(data["Edge_ID"])]
+    progress = []
+    pair_p = _permutation_p_values(
+        graph, paths, receptors, tfs, terminal_only, 37, 13, progress.append
+    )
+    assert pair_p == {
+        pair: (count + 1) / 38 for pair, count in expected_pairs.items()
+    }
+    assert all(
+        data["weight"] == original_weights[str(data["Edge_ID"])]
+        for _, _, data in graph.edges(data=True)
+    )
+    assert progress[-1] == "path permutations 37/37"
+
+
+def test_sender_attachment_preserves_raw_pair_p_values_without_adjustment():
     edges = pd.DataFrame([
         _edge("R1", "TF1", 0.1),
         _edge("R1", "TF2", 0.2),
@@ -207,7 +289,6 @@ def test_receptor_bh_family_is_distinct_from_rtf_pair_family():
             ("R2", "TF1"): [["R2", "TF1"]],
         },
         pair_p={("R1", "TF1"): 0.01, ("R1", "TF2"): 0.02, ("R2", "TF1"): 0.04},
-        receptor_p={"R1": 0.01, "R2": 0.04},
         retained_input_edges=3,
         path_graph_edges=3,
         path_graph_unannotated_edges=0,
@@ -218,12 +299,59 @@ def test_receptor_bh_family_is_distinct_from_rtf_pair_family():
         {"R1", "R2", "TF1", "TF2", "TG1", "TG2"},
         cache,
         pd.DataFrame({"Ligand": ["L1", "L2"], "Receptor": ["R1", "R2"]}),
-        path_alpha=0.03,
     )
-    receptor_rows = result.rmtf_paths.groupby("Receptor", sort=True).first()
-    assert receptor_rows.loc["R1", "Receptor_Q"] == 0.02
-    assert receptor_rows.loc["R2", "Receptor_Q"] == 0.04
-    assert bool(receptor_rows.loc["R1", "Receptor_Significant"])
-    assert not bool(receptor_rows.loc["R2", "Receptor_Significant"])
-    assert result.metadata["tested_receptors"] == 2
-    assert result.metadata["significant_receptors"] == 1
+    rows = result.rmtf_paths.set_index(["Receptor", "TF"])
+    assert rows["Path_P"].to_dict() == cache.pair_p
+    restricted = attach_sender_paths(
+        "OtherSender", "Receiver", {"L1"},
+        {"R1", "R2", "TF1", "TF2", "TG1", "TG2"},
+        cache,
+        pd.DataFrame({"Ligand": ["L1", "L2"], "Receptor": ["R1", "R2"]}),
+    )
+    restricted_rows = restricted.rmtf_paths.set_index(["Receptor", "TF"])
+    assert restricted_rows["Path_P"].to_dict() == {
+        ("R1", "TF1"): 0.01, ("R1", "TF2"): 0.02,
+    }
+
+
+def test_default_retains_only_the_lowest_cost_route_per_pair():
+    edges = pd.DataFrame([
+        _edge("R", "A", 0.1), _edge("A", "TF", 0.1),
+        _edge("R", "B", 0.4), _edge("B", "TF", 0.4),
+    ])
+    prior = pd.DataFrame({
+        "source": ["TF"], "target": ["TG"],
+        "prior_type": ["controls-expression-of"], "layer": ["tf_target"],
+    })
+    result = infer_paths(
+        "Sender", "Receiver", {"L"}, {"R", "A", "B", "TF", "TG"},
+        edges, prior, pd.DataFrame({"Ligand": ["L"], "Receptor": ["R"]}),
+        path_permutations=0,
+    )
+    assert len(result.rmtf_paths) == 1
+    assert result.rmtf_paths.iloc[0]["Mediator"] == "A"
+    assert result.rmtf_paths.iloc[0]["Alternative_Path_Count"] == 1
+    assert result.rmtf_paths["Path_P"].isna().all()
+    assert result.pathways["Path_P"].isna().all()
+
+
+def test_empty_path_result_has_only_the_current_permutation_schema():
+    edges = pd.DataFrame([_edge("R", "M", 0.1)])
+    prior = pd.DataFrame({
+        "source": ["TF"], "target": ["TG"],
+        "prior_type": ["controls-expression-of"], "layer": ["tf_target"],
+    })
+    result = infer_paths(
+        "Sender", "Receiver", {"L"}, {"R", "M", "TF", "TG"},
+        edges, prior, pd.DataFrame({"Ligand": ["L"], "Receptor": ["R"]}),
+        path_permutations=5,
+    )
+    assert result.pathways.empty and result.rmtf_paths.empty
+    for table in (result.pathways, result.rmtf_paths):
+        assert "Path_P" in table.columns
+        assert {
+            "Path_Q", "Receptor_P", "Receptor_Q", "Receptor_Significant",
+        }.isdisjoint(table.columns)
+    assert _permutation_p_values(
+        _build_graph(edges), {}, {"R"}, {"TF"}, set(), 5, 42, None,
+    ) == {}
