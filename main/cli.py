@@ -35,8 +35,7 @@ TEST_COUNT_COLUMNS = [
     "N_Receiver_Selected_Genes", "N_Candidate_Gene_Pairs", "N_Pearson",
     "N_Nonlinear_Edges", "N_Nonlinear_Model_Fits", "N_Retained_Edges",
     "N_RTF_Pairs", "N_Path_Permutations", "DE_Threshold",
-    "Pair_BH_Method", "Path_BH_Method",
-    "Receptor_BH_Method",
+    "Pair_BH_Method",
 ]
 
 EVIDENCE_PARAMETER_NAMES = [
@@ -48,7 +47,7 @@ EVIDENCE_PARAMETER_NAMES = [
 ]
 
 PATH_PARAMETER_NAMES = [
-    "pair", "k_paths", "path_permutations", "path_alpha", "seed",
+    "pair", "k_paths", "path_permutations", "seed",
 ]
 
 
@@ -109,11 +108,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--hub-penalty-weight", type=float, default=0.1)
     parser.add_argument("--hop-penalty", type=float, default=0.05)
     parser.add_argument(
-        "--k-paths", type=int, default=5,
-        help="Number of lowest-cost simple paths retained per R-TF pair (default: 5).",
+        "--k-paths", type=int, default=1,
+        help="Number of lowest-cost simple paths retained per R-TF pair (default: 1).",
     )
     parser.add_argument("--path-permutations", type=int, default=500)
-    parser.add_argument("--path-alpha", type=float, default=0.05)
     parser.add_argument(
         "--data-edges-per-node", type=int, default=20, help=argparse.SUPPRESS
     )
@@ -126,7 +124,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     args = parser.parse_args(argv)
     if args.stage in {"all", "evidence"} and not args.expression:
         parser.error("--expression is required for --stage all or evidence.")
-    for name in ("alpha", "de_threshold", "path_alpha"):
+    for name in ("alpha", "de_threshold"):
         if not 0 < getattr(args, name) < 1:
             parser.error(f"--{name.replace('_', '-')} must be between 0 and 1.")
     for name in ("min_cell_fraction", "min_gene_fraction"):
@@ -229,6 +227,11 @@ def _base_manifest(args: argparse.Namespace) -> dict[str, Any]:
             manifest = json.load(handle)
     else:
         manifest = {}
+    path_parameters = manifest.get("path_parameters", {})
+    path_parameters.pop("path_alpha", None)
+    multiple_testing = manifest.get("multiple_testing", {})
+    multiple_testing.pop("path_pair_diagnostic", None)
+    multiple_testing.pop("receptor_omnibus", None)
     manifest.update({
         "cellsign_version": __version__,
         "interpretation": (
@@ -478,8 +481,6 @@ def _run_evidence_stage(
             "Pair_BH_Method": (
                 "Benjamini-Hochberg over all receiver selected-gene pairs"
             ),
-            "Path_BH_Method": "Benjamini-Hochberg across R-TF pairs (diagnostic)",
-            "Receptor_BH_Method": "Benjamini-Hochberg across receptors by direction",
         })
         direction_tables[_direction_key(sender, receiver)] = {
             "sender": sender,
@@ -540,8 +541,7 @@ def _run_evidence_stage(
             "one_vs_rest_de": "None; raw two-sided Wilcoxon p-values are used",
             "pearson": "BH over all DEG pairs within each receiver network",
             "nonlinear": "receiver-only directional p-values Bonferroni-combined per edge, then BH within receiver network",
-            "path_pair_diagnostic": "BH across R-TF pairs within each direction",
-            "receptor_omnibus": "BH across receptors within each direction",
+            "path_pairs": "None; raw fixed-endpoint minimum-cost permutation p-values",
         },
         "direction_counts": {}, "path_search": {},
     })
@@ -643,7 +643,7 @@ def _run_path_stage(
         )
         result = attach_sender_paths(
             sender, receiver, sender_genes, receiver_genes, cache,
-            ligand_receptor, path_alpha=args.path_alpha,
+            ligand_receptor,
         )
         stem = _direction_stem(sender, receiver)
         _write_table(result.pathways, output_dir / f"{stem}_pathway.txt")
@@ -667,7 +667,7 @@ def _run_path_stage(
             "retained_input_edges": cache.retained_input_edges,
             "path_graph_edges": cache.path_graph_edges,
             "cached_rtf_pairs": len(cache.pair_paths),
-            "cached_receptors": len(cache.receptor_p),
+            "cached_receptors": len({receptor for receptor, _ in cache.pair_paths}),
         }
         print(
             f"[paths] {sender} -> {receiver}: {len(result.rmtf_paths)} R-M-TF paths",
@@ -678,6 +678,12 @@ def _run_path_stage(
     manifest = context["manifest"]
     completed = set(manifest.get("completed_stages", []))
     completed.add("paths")
+    multiple_testing = manifest.setdefault("multiple_testing", {})
+    multiple_testing.pop("path_pair_diagnostic", None)
+    multiple_testing.pop("receptor_omnibus", None)
+    multiple_testing["path_pairs"] = (
+        "None; raw fixed-endpoint minimum-cost permutation p-values"
+    )
     manifest.update({
         "completed_stages": sorted(completed),
         "path_parameters": _parameter_subset(args, PATH_PARAMETER_NAMES),
@@ -689,6 +695,7 @@ def _run_path_stage(
         "path_rule": "weighted k shortest simple directed paths; no maximum path length",
         "path_graph_policy": "intersection of evidence-supported edges and intracellular signaling prior",
         "path_null": "retained path-graph edge costs permuted over fixed topology",
+        "path_statistic": "minimum route cost for each fixed receptor-TF pair; raw Path_P only",
         "direction_counts": direction_counts,
         "path_search": path_search,
     })

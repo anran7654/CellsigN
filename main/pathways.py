@@ -13,19 +13,14 @@ import pandas as pd
 from scipy.sparse import csr_matrix
 from scipy.sparse.csgraph import dijkstra
 
-from .statistics import benjamini_hochberg
-
-
 MAIN_COLUMNS = [
     "Ligand", "Receptor", "Mediator", "TF", "Target", "Path_ID", "Path_Rank",
-    "Path_Length", "Path_Cost", "Path_P", "Path_Q", "Receptor_P",
-    "Receptor_Q", "Receptor_Significant", "Edge_Types", "Direction_Status",
+    "Path_Length", "Path_Cost", "Path_P", "Edge_Types", "Direction_Status",
 ]
 
 RMTF_COLUMNS = [
     "Path_ID", "Sender", "Receiver", "Receptor", "Mediator", "TF", "Path_Rank",
-    "Path_Length", "Path_Cost", "Path_P", "Path_Q", "Receptor_P",
-    "Receptor_Q", "Receptor_Significant", "Alternative_Path_Count",
+    "Path_Length", "Path_Cost", "Path_P", "Alternative_Path_Count",
     "Min_Stability", "Direction_Status",
 ]
 
@@ -61,7 +56,6 @@ class ReceiverPathCache:
     tf_target: pd.DataFrame
     pair_paths: dict[tuple[str, str], list[list[str]]]
     pair_p: dict[tuple[str, str], float]
-    receptor_p: dict[str, float]
     retained_input_edges: int
     path_graph_edges: int
     path_graph_unannotated_edges: int
@@ -257,21 +251,17 @@ def _permutation_p_values(
     permutations: int,
     seed: int,
     progress: Callable[[str], None] | None,
-) -> tuple[dict[tuple[str, str], float], dict[str, float]]:
-    """Return pair-level and receptor-level fixed-topology permutation p-values.
+) -> dict[tuple[str, str], float]:
+    """Return raw fixed-endpoint minimum-cost permutation p-values.
 
-    The receptor statistic is the minimum path cost from that receptor to any
-    reachable candidate TF. The same minimum-over-TFs selection is repeated in
-    every permutation, so the receptor p-value accounts for choosing its best
-    TF endpoint.
+    Graph topology and receptor-TF endpoints stay fixed while edge costs are
+    shuffled. The minimum route cost is recomputed for each pair in every
+    permutation. Alternative routes for a pair share this pair-level Path_P.
     """
     pairs = sorted(pair_paths)
     receptor_ids = sorted({receptor for receptor, _ in pairs})
     if permutations <= 0 or not pairs:
-        return (
-            {pair: np.nan for pair in pairs},
-            {receptor: np.nan for receptor in receptor_ids},
-        )
+        return {pair: np.nan for pair in pairs}
     observed = {
         pair: _path_cost(graph, pair_paths[pair][0]) for pair in pairs
     }
@@ -322,10 +312,7 @@ def _permutation_p_values(
         [node_index[tf] for _, tf in pairs], dtype=np.intp
     )
     observed_costs = np.asarray([observed[pair] for pair in pairs])
-    receptor_starts = np.unique(pair_sources, return_index=True)[1]
-    observed_receptor = np.minimum.reduceat(observed_costs, receptor_starts)
     extreme = np.zeros(len(pairs), dtype=np.int64)
-    receptor_extreme = np.zeros(len(receptor_ids), dtype=np.int64)
     rng = np.random.default_rng(seed)
     report_every = max(1, permutations // 10)
     for permutation in range(1, permutations + 1):
@@ -337,19 +324,13 @@ def _permutation_p_values(
         )
         null_costs = distances[pair_sources, pair_targets]
         extreme += null_costs <= observed_costs
-        receptor_extreme += (
-            np.minimum.reduceat(null_costs, receptor_starts) <= observed_receptor
-        )
         if progress and (permutation % report_every == 0 or permutation == permutations):
             progress(f"path permutations {permutation}/{permutations}")
     denominator = permutations + 1.0
-    return (
-        {pair: (extreme[index] + 1.0) / denominator for index, pair in enumerate(pairs)},
-        {
-            receptor: (receptor_extreme[index] + 1.0) / denominator
-            for index, receptor in enumerate(receptor_ids)
-        },
-    )
+    return {
+        pair: (extreme[index] + 1.0) / denominator
+        for index, pair in enumerate(pairs)
+    }
 
 
 def prepare_receiver_path_cache(
@@ -359,7 +340,7 @@ def prepare_receiver_path_cache(
     prior_edges: pd.DataFrame,
     receptors: set[str],
     path_permutations: int = 500,
-    k_paths: int = 5,
+    k_paths: int = 1,
     data_edges_per_node: int = 20,
     seed: int = 0,
     progress: Callable[[str], None] | None = None,
@@ -405,7 +386,7 @@ def prepare_receiver_path_cache(
                 f"{len(tf_candidates)} TF endpoints; up to {k_paths} paths each"
             )
 
-    pair_p, receptor_p = _permutation_p_values(
+    pair_p = _permutation_p_values(
         graph, pair_paths, receptors, tf_candidates, terminal_only,
         path_permutations, seed, progress,
     )
@@ -415,7 +396,6 @@ def prepare_receiver_path_cache(
         tf_target=tf_target,
         pair_paths=pair_paths,
         pair_p=pair_p,
-        receptor_p=receptor_p,
         retained_input_edges=retained_count,
         path_graph_edges=len(path_edges),
         path_graph_unannotated_edges=unannotated_count,
@@ -430,7 +410,6 @@ def attach_sender_paths(
     receiver_genes: set[str],
     cache: ReceiverPathCache,
     ligand_receptor: pd.DataFrame,
-    path_alpha: float = 0.05,
 ) -> PathResult:
     """Attach sender ligands and receiver targets to a cached R-TF network."""
     lr = ligand_receptor[
@@ -442,14 +421,10 @@ def attach_sender_paths(
         pair: paths for pair, paths in cache.pair_paths.items()
         if pair[0] in available_receptors
     }
-    receptor_ids = sorted({receptor for receptor, _ in pair_paths})
     metadata = {
         "eligible_lr_pairs": int(len(lr)),
         "eligible_receptors": int(len(available_receptors)),
         "tested_rtf_pairs": int(len(pair_paths)),
-        "tested_receptors": len(receptor_ids),
-        "significant_receptors": 0,
-        "receptor_fdr_threshold": path_alpha,
         "retained_input_edges": cache.retained_input_edges,
         "path_graph_edges": cache.path_graph_edges,
         "path_graph_unannotated_edges": cache.path_graph_unannotated_edges,
@@ -458,29 +433,6 @@ def attach_sender_paths(
     if not pair_paths:
         return _empty_result(metadata)
 
-    pairs = list(pair_paths)
-    p_values = np.asarray([cache.pair_p.get(pair, np.nan) for pair in pairs])
-    q_values = benjamini_hochberg(p_values)
-    pair_statistics = {
-        pair: (float(p_values[index]), float(q_values[index]))
-        for index, pair in enumerate(pairs)
-    }
-    receptor_p_values = np.asarray([
-        cache.receptor_p.get(receptor, np.nan) for receptor in receptor_ids
-    ])
-    receptor_q_values = benjamini_hochberg(receptor_p_values)
-    receptor_statistics = {
-        receptor: (
-            float(receptor_p_values[index]),
-            float(receptor_q_values[index]),
-        )
-        for index, receptor in enumerate(receptor_ids)
-    }
-    metadata.update({
-        "tested_receptors": len(receptor_ids),
-        "significant_receptors": int(np.sum(receptor_q_values <= path_alpha)),
-        "receptor_fdr_threshold": path_alpha,
-    })
     ligands_by_receptor = lr.groupby("Receptor")["Ligand"].apply(
         lambda values: ",".join(sorted(set(map(str, values))))
     ).to_dict()
@@ -493,11 +445,7 @@ def attach_sender_paths(
     main_records: list[dict[str, object]] = []
     path_counter = 0
     for (receptor, tf), paths in pair_paths.items():
-        path_p, path_q = pair_statistics[(receptor, tf)]
-        receptor_p, receptor_q = receptor_statistics[receptor]
-        receptor_significant: bool | object = (
-            bool(receptor_q <= path_alpha) if np.isfinite(receptor_q) else pd.NA
-        )
+        path_p = float(cache.pair_p.get((receptor, tf), np.nan))
         for rank, path in enumerate(paths, start=1):
             path_counter += 1
             path_id = f"{sender}_to_{receiver}_P{path_counter:06d}"
@@ -516,9 +464,7 @@ def attach_sender_paths(
                 "Path_ID": path_id, "Sender": sender, "Receiver": receiver,
                 "Receptor": receptor, "Mediator": mediator, "TF": tf,
                 "Path_Rank": rank, "Path_Length": len(path) - 1,
-                "Path_Cost": cost, "Path_P": path_p, "Path_Q": path_q,
-                "Receptor_P": receptor_p, "Receptor_Q": receptor_q,
-                "Receptor_Significant": receptor_significant,
+                "Path_Cost": cost, "Path_P": path_p,
                 "Alternative_Path_Count": len(paths),
                 "Min_Stability": min(stabilities) if stabilities else np.nan,
                 "Direction_Status": status,
@@ -545,9 +491,7 @@ def attach_sender_paths(
                     "Ligand": ligand, "Receptor": receptor, "Mediator": mediator,
                     "TF": tf, "Target": target, "Path_ID": path_id,
                     "Path_Rank": rank, "Path_Length": len(path) - 1,
-                    "Path_Cost": cost, "Path_P": path_p, "Path_Q": path_q,
-                    "Receptor_P": receptor_p, "Receptor_Q": receptor_q,
-                    "Receptor_Significant": receptor_significant,
+                    "Path_Cost": cost, "Path_P": path_p,
                     "Edge_Types": edge_types,
                     "Direction_Status": status,
                 })
@@ -590,9 +534,8 @@ def infer_paths(
     prior_edges: pd.DataFrame,
     ligand_receptor: pd.DataFrame,
     path_permutations: int = 500,
-    k_paths: int = 5,
+    k_paths: int = 1,
     data_edges_per_node: int = 20,
-    path_alpha: float = 0.05,
     seed: int = 0,
 ) -> PathResult:
     """Compatibility wrapper for one sender-receiver analysis."""
@@ -610,5 +553,4 @@ def infer_paths(
     )
     return attach_sender_paths(
         sender, receiver, sender_genes, receiver_genes, cache, ligand_receptor,
-        path_alpha=path_alpha,
     )
