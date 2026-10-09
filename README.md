@@ -124,8 +124,9 @@ matrix and matching cell labels derived from the primary breast cancer dataset
 of Chung et al. (2017), available from GEO as
 [GSE75688](https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE75688).
 The table exports the `X` matrix of the processed h5ad used for analysis;
-it is **not** the original GEO raw matrix. See [data provenance](DATA_PROVENANCE.md)
-for details.
+it is **not** the original GEO raw matrix. The export retains the processed
+expression values, cell identifiers and cell-type labels. The original h5ad
+is not included in the repository.
 
 Run the supplied text export with the two bundled reference tables:
 
@@ -158,9 +159,11 @@ The intracellular reference is bundled as
 directly; decompression is unnecessary. The ligand–receptor reader uses the
 first two columns of `reference_data/human/ligand_receptor.txt` and does not
 apply a score threshold because this supplied table is already curated.
-Reference origins, limitations and checksums are described in
-[data provenance](DATA_PROVENANCE.md) and
-[source provenance](SOURCE_PROVENANCE.md).
+The intracellular table contains both intracellular signaling and TF–target
+relationships. These aggregated reference tables do not record the source
+database for each interaction, so they cannot establish how many databases
+support an individual edge. Repository file checksums are listed in
+`SHA256SUMS`.
 
 ## Read the results
 
@@ -219,5 +222,6 @@ by themselves establish causal signaling. Independent biological validation
 is required for causal claims.
 
 The source code is distributed under [GPL-3.0](LICENSE). The bundled reference
-tables may also be subject to their upstream sources' terms; see
-[data provenance](DATA_PROVENANCE.md).
+tables remain subject to their upstream sources' terms. Consult those terms
+before redistributing the tables or derived data; the source-code license
+does not replace them.
